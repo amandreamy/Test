@@ -1,27 +1,24 @@
 #!/usr/bin/env python3
 
-import requests
 import os
 import json
 import sys
+from datadog_api_client.v2 import ApiClient, ApiException, Configuration
+from datadog_api_client.v2.api import services_api
 
-# --- Configuration ---
-DATADOG_API_URL = "https://api.us3.datadoghq.com/api/v2/apm/services"
-# Using the filter from your curl command
-DATADOG_PARAMS = {"filter[env]": "*"}
-REQUEST_TIMEOUT = 30 # seconds
-
-def get_datadog_services():
+def get_datadog_services_sdk_formatted():
     """
-    Fetches the list of APM services from the Datadog API and extracts service names.
+    Fetches the list of APM services from the Datadog API using the official SDK.
 
-    Reads DD_API_KEY and DD_APP_KEY from environment variables.
-    Prints the list of service names as a JSON array to stdout.
-    Exits with an error message if keys are missing or the API call fails.
+    Reads DD_API_KEY, DD_APP_KEY, and DD_SITE from environment variables.
+    Formats the output as a JSON object: {"services": [list_of_service_details]}
+    and prints it to stdout.
+    Exits with an error message if keys/site are missing or the API call fails.
     """
-    # --- Get API Keys from Environment Variables ---
+    # --- Get API Keys and Site from Environment Variables ---
     api_key = os.environ.get("DD_API_KEY")
     app_key = os.environ.get("DD_APP_KEY")
+    site = os.environ.get("DD_SITE") # e.g., "us3.datadoghq.com", "datadoghq.com"
 
     if not api_key:
         print("Error: DD_API_KEY environment variable not set.", file=sys.stderr)
@@ -29,63 +26,55 @@ def get_datadog_services():
     if not app_key:
         print("Error: DD_APP_KEY environment variable not set.", file=sys.stderr)
         sys.exit(1)
+    if not site:
+        print("Error: DD_SITE environment variable not set (e.g., 'us3.datadoghq.com', 'datadoghq.com').", file=sys.stderr)
+        sys.exit(1)
 
-    # --- Prepare Request Headers ---
-    headers = {
-        "Accept": "application/json",
-        "DD-API-KEY": api_key,
-        "DD-APPLICATION-KEY": app_key,
-    }
+    # --- Configure API Client ---
+    configuration = Configuration()
+    # Configuration automatically picks up DD_API_KEY, DD_APP_KEY, DD_SITE
+    # from environment variables if set.
 
-    # --- Make API Request ---
+    # --- Make API Call ---
     try:
-        print(f"Fetching services from {DATADOG_API_URL}...", file=sys.stderr)
-        response = requests.get(
-            DATADOG_API_URL,
-            headers=headers,
-            params=DATADOG_PARAMS,
-            timeout=REQUEST_TIMEOUT
-        )
-        response.raise_for_status() # Raise an HTTPError for bad responses (4xx or 5xx)
+        with ApiClient(configuration) as api_client:
+            api_instance = services_api.ServicesApi(api_client)
+            print(f"Fetching services from Datadog site {site}...", file=sys.stderr)
 
-    except requests.exceptions.Timeout:
-        print(f"Error: Request timed out after {REQUEST_TIMEOUT} seconds.", file=sys.stderr)
-        sys.exit(1)
-    except requests.exceptions.RequestException as e:
-        print(f"Error during API request: {e}", file=sys.stderr)
-        # Attempt to print Datadog error message if available
-        try:
-            error_data = e.response.json()
-            if 'errors' in error_data:
-                 print(f"Datadog API Error: {error_data['errors']}", file=sys.stderr)
-        except (AttributeError, ValueError, TypeError, KeyError):
-             pass # Ignore if response or JSON parsing fails
-        sys.exit(1)
+            # List services, using the environment filter '*'
+            response = api_instance.list_services(filter_env="*")
 
-    # --- Parse JSON Response ---
-    try:
-        data = response.json()
-    except json.JSONDecodeError as e:
-        print(f"Error: Failed to decode JSON response: {e}", file=sys.stderr)
-        print(f"Raw response text: {response.text}", file=sys.stderr)
-        sys.exit(1)
-
-    # --- Extract Service Names ---
-    service_names = []
-    if 'data' in data and isinstance(data['data'], list):
-        for item in data['data']:
-            # Ensure the item is a dictionary and has the expected structure
-            if isinstance(item, dict) and item.get('type') == 'services' and 'id' in item:
-                service_names.append(item['id'])
+            # --- Extract Full Service Details and Format Output ---
+            service_details_list = []
+            if response and hasattr(response, 'data') and isinstance(response.data, list):
+                for item in response.data:
+                    # Convert the SDK's service object to a dictionary
+                    if hasattr(item, 'to_dict'):
+                        service_details_list.append(item.to_dict())
+                    else:
+                         print(f"Warning: Skipping item without 'to_dict' method: {item}", file=sys.stderr)
             else:
-                 print(f"Warning: Skipping unexpected item format in 'data': {item}", file=sys.stderr)
-    else:
-        print("Warning: 'data' key not found or not a list in the API response.", file=sys.stderr)
-        print(f"Full response: {json.dumps(data, indent=2)}", file=sys.stderr)
+                 print("Warning: No 'data' list found in the API response.", file=sys.stderr)
+                 print(f"Full response object: {response}", file=sys.stderr)
 
+            # Create the final output dictionary with the "services" key
+            output_json = {"services": service_details_list}
 
-    # --- Print Service Names as JSON list ---
-    print(json.dumps(service_names, indent=2)) # Pretty print JSON output
+            # --- Print Formatted JSON Output ---
+            print(json.dumps(output_json, indent=2)) # Pretty print
+
+    except ApiException as e:
+        print(f"Datadog API Error: {e}", file=sys.stderr)
+        try:
+            error_body = json.loads(e.body)
+            if 'errors' in error_body:
+                print(f"Error details: {error_body['errors']}", file=sys.stderr)
+        except (json.JSONDecodeError, TypeError):
+             pass
+        sys.exit(1)
+    except Exception as e:
+        print(f"An unexpected error occurred: {e}", file=sys.stderr)
+        sys.exit(1)
 
 if __name__ == "__main__":
-    get_datadog_services()
+    get_datadog_services_sdk_formatted()
